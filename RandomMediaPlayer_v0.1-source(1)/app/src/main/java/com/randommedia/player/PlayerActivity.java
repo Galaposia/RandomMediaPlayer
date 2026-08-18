@@ -6,7 +6,6 @@ import android.graphics.Color;
 import android.graphics.ImageDecoder;
 import android.graphics.drawable.AnimatedImageDrawable;
 import android.graphics.drawable.Drawable;
-import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -24,7 +23,13 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.VideoView;
+
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.ui.AspectRatioFrameLayout;
+import androidx.media3.ui.PlayerView;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -35,6 +40,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class PlayerActivity extends Activity {
@@ -53,7 +59,7 @@ public class PlayerActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private final Random random = new Random();
-    private final ArrayList<VideoView> activeVideos = new ArrayList<>();
+    private final ArrayList<ExoPlayer> activePlayers = new ArrayList<>();
     private final ArrayList<AnimatedImageDrawable> activeAnimations = new ArrayList<>();
     private final ArrayList<Slide> history = new ArrayList<>();
 
@@ -71,6 +77,7 @@ public class PlayerActivity extends Activity {
     private long timerDeadlineMs = 0;
     private long timerRemainingMs = 0;
     private boolean currentUsesTimer = false;
+    private boolean advanceWhenResumed = false;
     private Runnable timedAdvance;
     private Runnable hideControlsRunnable;
 
@@ -270,6 +277,7 @@ public class PlayerActivity extends Activity {
         mediaContainer.setBackgroundColor(Color.BLACK);
         currentUsesTimer = false;
         timerRemainingMs = 0;
+        advanceWhenResumed = false;
 
         if (slide.items.size() <= 1) {
             MediaItem item = slide.items.get(0);
@@ -291,70 +299,39 @@ public class PlayerActivity extends Activity {
     }
 
     private void showSingleVideo(MediaItem item, int token) {
-        VideoView video = new VideoView(this);
-        video.setBackgroundColor(Color.BLACK);
-        mediaContainer.addView(video, match());
-        activeVideos.add(video);
-        try {
-            video.setVideoURI(item.asUri());
-            video.setOnPreparedListener(mp -> {
-                if (token != renderToken) return;
-                mp.setLooping(false);
-                mp.setVolume(1f, 1f);
-                if (!paused) video.start();
-            });
-            video.setOnCompletionListener(mp -> {
-                if (token == renderToken && !paused) nextSlide();
-            });
-            video.setOnErrorListener((mp, what, extra) -> {
-                if (token == renderToken) {
-                    Toast.makeText(this, "No se pudo reproducir: " + item.name, Toast.LENGTH_SHORT).show();
-                    handler.postDelayed(this::nextSlide, 500);
-                }
-                return true;
-            });
-        } catch (Exception e) {
-            handler.postDelayed(this::nextSlide, 500);
-        }
+        PlayerView videoView = createVideoPlayerView(item, token, false, () -> {
+            if (token != renderToken) return;
+            if (paused) {
+                advanceWhenResumed = true;
+            } else {
+                nextSlide();
+            }
+        });
+        mediaContainer.addView(videoView, match());
     }
 
     private void showCollage(List<MediaItem> items, int token) {
-        View collage = buildCollageLayout(items, token);
-        mediaContainer.addView(collage, match());
-
         int videoCount = 0;
         for (MediaItem item : items) if (item.video) videoCount++;
+
+        AtomicInteger remainingVideos = videoCount > 0 ? new AtomicInteger(videoCount) : null;
+        View collage = buildCollageLayout(items, token, remainingVideos);
+        mediaContainer.addView(collage, match());
+
         if (videoCount == 0) {
             startSlideTimer(imageDurationMs);
-            return;
-        }
-
-        AtomicInteger remainingVideos = new AtomicInteger(videoCount);
-        // VideoViews have already been inserted. Their listeners are attached in buildMediaCell.
-        for (VideoView video : activeVideos) {
-            Object tag = video.getTag();
-            if (!(tag instanceof Integer) || ((Integer) tag) != token) continue;
-            video.setOnCompletionListener(mp -> {
-                if (token != renderToken) return;
-                if (remainingVideos.decrementAndGet() <= 0 && !paused) nextSlide();
-            });
-            video.setOnErrorListener((mp, what, extra) -> {
-                if (token != renderToken) return true;
-                if (remainingVideos.decrementAndGet() <= 0 && !paused) handler.postDelayed(this::nextSlide, 200);
-                return true;
-            });
         }
     }
 
-    private View buildCollageLayout(List<MediaItem> items, int token) {
+    private View buildCollageLayout(List<MediaItem> items, int token, AtomicInteger remainingVideos) {
         int n = items.size();
         if (n == 2) {
             LinearLayout pair = new LinearLayout(this);
             pair.setBackgroundColor(Color.BLACK);
             boolean vertical = random.nextBoolean();
             pair.setOrientation(vertical ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
-            pair.addView(buildMediaCell(items.get(0), token), weightedCellFor(pair));
-            pair.addView(buildMediaCell(items.get(1), token), weightedCellFor(pair));
+            pair.addView(buildMediaCell(items.get(0), token, remainingVideos), weightedCellFor(pair));
+            pair.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(pair));
             return pair;
         }
 
@@ -364,11 +341,11 @@ public class PlayerActivity extends Activity {
             outer.setOrientation(LinearLayout.HORIZONTAL);
             outer.setBackgroundColor(Color.BLACK);
 
-            View large = buildMediaCell(items.get(0), token);
+            View large = buildMediaCell(items.get(0), token, remainingVideos);
             LinearLayout stacked = new LinearLayout(this);
             stacked.setOrientation(LinearLayout.VERTICAL);
-            stacked.addView(buildMediaCell(items.get(1), token), weightedCellFor(stacked));
-            stacked.addView(buildMediaCell(items.get(2), token), weightedCellFor(stacked));
+            stacked.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(stacked));
+            stacked.addView(buildMediaCell(items.get(2), token, remainingVideos), weightedCellFor(stacked));
 
             if (!mirrored) {
                 outer.addView(large, weightedCellFor(outer));
@@ -387,45 +364,91 @@ public class PlayerActivity extends Activity {
         row1.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
-        row1.addView(buildMediaCell(items.get(0), token), weightedCellFor(row1));
-        row1.addView(buildMediaCell(items.get(1), token), weightedCellFor(row1));
-        row2.addView(buildMediaCell(items.get(2), token), weightedCellFor(row2));
-        row2.addView(buildMediaCell(items.get(3), token), weightedCellFor(row2));
+        row1.addView(buildMediaCell(items.get(0), token, remainingVideos), weightedCellFor(row1));
+        row1.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(row1));
+        row2.addView(buildMediaCell(items.get(2), token, remainingVideos), weightedCellFor(row2));
+        row2.addView(buildMediaCell(items.get(3), token, remainingVideos), weightedCellFor(row2));
         outer.addView(row1, weightedCellFor(outer));
         outer.addView(row2, weightedCellFor(outer));
         return outer;
     }
 
-    private View buildMediaCell(MediaItem item, int token) {
+    private View buildMediaCell(MediaItem item, int token, AtomicInteger remainingVideos) {
         FrameLayout cell = new FrameLayout(this);
         cell.setBackgroundColor(Color.BLACK);
         int gap = dp(2);
         cell.setPadding(gap, gap, gap, gap);
 
         if (item.video) {
-            VideoView video = new VideoView(this);
-            video.setBackgroundColor(Color.BLACK);
-            video.setTag(token);
-            cell.addView(video, match());
-            activeVideos.add(video);
-            try {
-                video.setVideoURI(item.asUri());
-                video.setOnPreparedListener(mp -> {
-                    if (token != renderToken) return;
-                    mp.setLooping(false);
-                    mp.setVolume(0f, 0f);
-                    if (!paused) video.start();
-                });
-            } catch (Exception ignored) {}
+            PlayerView videoView = createVideoPlayerView(item, token, true, () -> {
+                if (token != renderToken || remainingVideos == null) return;
+                if (remainingVideos.decrementAndGet() <= 0) {
+                    if (paused) {
+                        advanceWhenResumed = true;
+                    } else {
+                        nextSlide();
+                    }
+                }
+            });
+            cell.addView(videoView, match());
             return cell;
         }
 
         ImageView image = new ImageView(this);
         image.setBackgroundColor(Color.BLACK);
-        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setAdjustViewBounds(true);
         cell.addView(image, match());
-        loadImage(item, image, token, false);
+        loadImage(item, image, token, true);
         return cell;
+    }
+
+    private PlayerView createVideoPlayerView(MediaItem item, int token, boolean muted, Runnable onFinished) {
+        PlayerView view = new PlayerView(this);
+        view.setBackgroundColor(Color.BLACK);
+        view.setUseController(false);
+        view.setResizeMode(AspectRatioFrameLayout.RESIZE_MODE_FIT);
+        view.setShutterBackgroundColor(Color.BLACK);
+
+        DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
+                .setEnableDecoderFallback(true);
+        ExoPlayer player = new ExoPlayer.Builder(this, renderersFactory).build();
+        activePlayers.add(player);
+        view.setPlayer(player);
+        player.setRepeatMode(Player.REPEAT_MODE_OFF);
+        player.setVolume(muted ? 0f : 1f);
+
+        AtomicBoolean finished = new AtomicBoolean(false);
+        Runnable finishOnce = () -> {
+            if (token != renderToken || !finished.compareAndSet(false, true)) return;
+            onFinished.run();
+        };
+
+        player.addListener(new Player.Listener() {
+            @Override
+            public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState == Player.STATE_ENDED) finishOnce.run();
+            }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                if (token == renderToken) {
+                    Toast.makeText(PlayerActivity.this,
+                            "No se pudo reproducir: " + item.name + " (" + error.getErrorCodeName() + ")",
+                            Toast.LENGTH_SHORT).show();
+                }
+                finishOnce.run();
+            }
+        });
+
+        try {
+            player.setMediaItem(androidx.media3.common.MediaItem.fromUri(item.asUri()));
+            player.prepare();
+            if (!paused) player.play();
+        } catch (RuntimeException e) {
+            handler.post(finishOnce);
+        }
+        return view;
     }
 
     private void loadImage(MediaItem item, ImageView target, int token, boolean fitEntireImage) {
@@ -444,7 +467,7 @@ public class PlayerActivity extends Activity {
                 });
                 runOnUiThread(() -> {
                     if (token != renderToken || isFinishing()) return;
-                    target.setScaleType(fitEntireImage ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+                    target.setScaleType(ImageView.ScaleType.FIT_CENTER);
                     target.setImageDrawable(drawable);
                     if (drawable instanceof AnimatedImageDrawable) {
                         AnimatedImageDrawable animated = (AnimatedImageDrawable) drawable;
@@ -494,8 +517,8 @@ public class PlayerActivity extends Activity {
                 timerRemainingMs = Math.max(1, timerDeadlineMs - SystemClock.uptimeMillis());
                 cancelTimer();
             }
-            for (VideoView video : activeVideos) {
-                try { if (video.isPlaying()) video.pause(); } catch (Exception ignored) {}
+            for (ExoPlayer player : activePlayers) {
+                try { player.pause(); } catch (Exception ignored) {}
             }
             for (AnimatedImageDrawable animated : activeAnimations) {
                 try { animated.stop(); } catch (Exception ignored) {}
@@ -504,11 +527,16 @@ public class PlayerActivity extends Activity {
             cancelHideControls();
         } else {
             if (currentUsesTimer) scheduleTimer(timerRemainingMs > 0 ? timerRemainingMs : imageDurationMs);
-            for (VideoView video : activeVideos) {
-                try { video.start(); } catch (Exception ignored) {}
+            for (ExoPlayer player : activePlayers) {
+                try { player.play(); } catch (Exception ignored) {}
             }
             for (AnimatedImageDrawable animated : activeAnimations) {
                 try { animated.start(); } catch (Exception ignored) {}
+            }
+            if (advanceWhenResumed) {
+                advanceWhenResumed = false;
+                handler.post(this::nextSlide);
+                return;
             }
             scheduleControlsHide();
         }
@@ -517,10 +545,10 @@ public class PlayerActivity extends Activity {
     private void stopCurrentPlayback() {
         cancelTimer();
         cancelHideControls();
-        for (VideoView video : activeVideos) {
-            try { video.stopPlayback(); } catch (Exception ignored) {}
+        for (ExoPlayer player : activePlayers) {
+            try { player.release(); } catch (Exception ignored) {}
         }
-        activeVideos.clear();
+        activePlayers.clear();
         for (AnimatedImageDrawable animated : activeAnimations) {
             try { animated.stop(); } catch (Exception ignored) {}
         }
