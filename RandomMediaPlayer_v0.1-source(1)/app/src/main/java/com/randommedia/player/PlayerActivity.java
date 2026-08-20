@@ -1,6 +1,7 @@
 package com.randommedia.player;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.ImageDecoder;
@@ -275,6 +276,7 @@ public class PlayerActivity extends Activity {
         stopCurrentPlayback();
         mediaContainer.removeAllViews();
         mediaContainer.setBackgroundColor(Color.BLACK);
+        progress.setVisibility(View.GONE);
         currentUsesTimer = false;
         timerRemainingMs = 0;
         advanceWhenResumed = false;
@@ -311,66 +313,208 @@ public class PlayerActivity extends Activity {
     }
 
     private void showCollage(List<MediaItem> items, int token) {
-        int videoCount = 0;
-        for (MediaItem item : items) if (item.video) videoCount++;
+        progress.setVisibility(View.VISIBLE);
+        int screenWidth = Math.max(1, mediaContainer.getWidth());
+        int screenHeight = Math.max(1, mediaContainer.getHeight());
+        if (screenWidth <= 1 || screenHeight <= 1) {
+            screenWidth = Math.max(1, getResources().getDisplayMetrics().widthPixels);
+            screenHeight = Math.max(1, getResources().getDisplayMetrics().heightPixels);
+        }
+        final int availableWidth = screenWidth;
+        final int availableHeight = screenHeight;
 
-        AtomicInteger remainingVideos = videoCount > 0 ? new AtomicInteger(videoCount) : null;
-        View collage = buildCollageLayout(items, token, remainingVideos);
-        mediaContainer.addView(collage, match());
+        executor.execute(() -> {
+            for (MediaItem item : items) {
+                item.resolveDimensions(this);
+            }
+            CollagePlan plan = chooseBestCollagePlan(items, availableWidth, availableHeight);
+            runOnUiThread(() -> {
+                if (token != renderToken || isFinishing() || isDestroyed()) return;
+                progress.setVisibility(View.GONE);
 
-        if (videoCount == 0) {
-            startSlideTimer(imageDurationMs);
+                int videoCount = 0;
+                for (MediaItem item : plan.itemsByCell) if (item.video) videoCount++;
+                AtomicInteger remainingVideos = videoCount > 0 ? new AtomicInteger(videoCount) : null;
+                View collage = buildCollageLayout(plan, token, remainingVideos);
+                mediaContainer.addView(collage, match());
+
+                if (videoCount == 0) {
+                    startSlideTimer(imageDurationMs);
+                }
+            });
+        });
+    }
+
+    private View buildCollageLayout(CollagePlan plan, int token, AtomicInteger remainingVideos) {
+        SmartCollageLayout collage = new SmartCollageLayout(this, plan.layout.cells);
+        for (MediaItem item : plan.itemsByCell) {
+            collage.addView(buildMediaCell(item, token, remainingVideos));
+        }
+        return collage;
+    }
+
+    private CollagePlan chooseBestCollagePlan(List<MediaItem> items, int width, int height) {
+        float screenRatio = (float) width / (float) height;
+        CollagePlan bestPlan = null;
+        double bestScore = -1.0;
+
+        for (LayoutCandidate candidate : collageCandidates(items.size())) {
+            BestAssignment assignment = new BestAssignment();
+            findBestAssignment(candidate, items, screenRatio, 0,
+                    new boolean[items.size()], new ArrayList<>(), assignment);
+            if (assignment.score > bestScore) {
+                bestScore = assignment.score;
+                bestPlan = new CollagePlan(candidate, assignment.items);
+            }
+        }
+
+        if (bestPlan == null) {
+            LayoutCandidate fallback = new LayoutCandidate("fallback",
+                    new RectSpec(0f, 0f, 1f, 1f));
+            bestPlan = new CollagePlan(fallback, items);
+        }
+        return bestPlan;
+    }
+
+    private void findBestAssignment(LayoutCandidate candidate,
+                                    List<MediaItem> source,
+                                    float screenRatio,
+                                    int cellIndex,
+                                    boolean[] used,
+                                    ArrayList<MediaItem> current,
+                                    BestAssignment best) {
+        if (cellIndex >= candidate.cells.length) {
+            double score = scoreAssignment(candidate, current, screenRatio);
+            if (score > best.score) {
+                best.score = score;
+                best.items = new ArrayList<>(current);
+            }
+            return;
+        }
+
+        for (int i = 0; i < source.size(); i++) {
+            if (used[i]) continue;
+            used[i] = true;
+            current.add(source.get(i));
+            findBestAssignment(candidate, source, screenRatio, cellIndex + 1,
+                    used, current, best);
+            current.remove(current.size() - 1);
+            used[i] = false;
         }
     }
 
-    private View buildCollageLayout(List<MediaItem> items, int token, AtomicInteger remainingVideos) {
-        int n = items.size();
-        if (n == 2) {
-            LinearLayout pair = new LinearLayout(this);
-            pair.setBackgroundColor(Color.BLACK);
-            boolean vertical = random.nextBoolean();
-            pair.setOrientation(vertical ? LinearLayout.VERTICAL : LinearLayout.HORIZONTAL);
-            pair.addView(buildMediaCell(items.get(0), token, remainingVideos), weightedCellFor(pair));
-            pair.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(pair));
-            return pair;
-        }
+    private double scoreAssignment(LayoutCandidate candidate,
+                                   List<MediaItem> assignment,
+                                   float screenRatio) {
+        double score = 0.0;
+        for (int i = 0; i < candidate.cells.length; i++) {
+            RectSpec cell = candidate.cells[i];
+            MediaItem item = assignment.get(i);
+            float mediaRatio = clampRatio(item.aspectRatio());
+            float cellRatio = clampRatio(screenRatio * cell.width() / cell.height());
+            float fittedArea = Math.min(mediaRatio / cellRatio, cellRatio / mediaRatio);
+            float cellArea = cell.width() * cell.height();
+            score += fittedArea * cellArea;
 
-        if (n == 3) {
-            boolean mirrored = random.nextBoolean();
-            LinearLayout outer = new LinearLayout(this);
-            outer.setOrientation(LinearLayout.HORIZONTAL);
-            outer.setBackgroundColor(Color.BLACK);
-
-            View large = buildMediaCell(items.get(0), token, remainingVideos);
-            LinearLayout stacked = new LinearLayout(this);
-            stacked.setOrientation(LinearLayout.VERTICAL);
-            stacked.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(stacked));
-            stacked.addView(buildMediaCell(items.get(2), token, remainingVideos), weightedCellFor(stacked));
-
-            if (!mirrored) {
-                outer.addView(large, weightedCellFor(outer));
-                outer.addView(stacked, weightedCellFor(outer));
-            } else {
-                outer.addView(stacked, weightedCellFor(outer));
-                outer.addView(large, weightedCellFor(outer));
+            if (item.orientation() == orientationForRatio(cellRatio)) {
+                score += cellArea * 0.025;
             }
-            return outer;
+        }
+        return score;
+    }
+
+    private List<LayoutCandidate> collageCandidates(int count) {
+        ArrayList<LayoutCandidate> result = new ArrayList<>();
+        if (count == 2) {
+            result.add(new LayoutCandidate("two-columns",
+                    rect(0f, 0f, .5f, 1f), rect(.5f, 0f, 1f, 1f)));
+            result.add(new LayoutCandidate("two-columns-asymmetric",
+                    rect(0f, 0f, .38f, 1f), rect(.38f, 0f, 1f, 1f)));
+            result.add(new LayoutCandidate("two-rows",
+                    rect(0f, 0f, 1f, .5f), rect(0f, .5f, 1f, 1f)));
+            result.add(new LayoutCandidate("two-rows-asymmetric",
+                    rect(0f, 0f, 1f, .38f), rect(0f, .38f, 1f, 1f)));
+            return result;
         }
 
-        LinearLayout outer = new LinearLayout(this);
-        outer.setOrientation(LinearLayout.VERTICAL);
-        outer.setBackgroundColor(Color.BLACK);
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        row1.addView(buildMediaCell(items.get(0), token, remainingVideos), weightedCellFor(row1));
-        row1.addView(buildMediaCell(items.get(1), token, remainingVideos), weightedCellFor(row1));
-        row2.addView(buildMediaCell(items.get(2), token, remainingVideos), weightedCellFor(row2));
-        row2.addView(buildMediaCell(items.get(3), token, remainingVideos), weightedCellFor(row2));
-        outer.addView(row1, weightedCellFor(outer));
-        outer.addView(row2, weightedCellFor(outer));
-        return outer;
+        if (count == 3) {
+            result.add(new LayoutCandidate("three-columns",
+                    rect(0f, 0f, 1f / 3f, 1f),
+                    rect(1f / 3f, 0f, 2f / 3f, 1f),
+                    rect(2f / 3f, 0f, 1f, 1f)));
+            result.add(new LayoutCandidate("three-rows",
+                    rect(0f, 0f, 1f, 1f / 3f),
+                    rect(0f, 1f / 3f, 1f, 2f / 3f),
+                    rect(0f, 2f / 3f, 1f, 1f)));
+            result.add(new LayoutCandidate("tall-left",
+                    rect(0f, 0f, .42f, 1f),
+                    rect(.42f, 0f, 1f, .5f),
+                    rect(.42f, .5f, 1f, 1f)));
+            result.add(new LayoutCandidate("tall-right",
+                    rect(.58f, 0f, 1f, 1f),
+                    rect(0f, 0f, .58f, .5f),
+                    rect(0f, .5f, .58f, 1f)));
+            result.add(new LayoutCandidate("wide-top",
+                    rect(0f, 0f, 1f, .42f),
+                    rect(0f, .42f, .5f, 1f),
+                    rect(.5f, .42f, 1f, 1f)));
+            result.add(new LayoutCandidate("wide-bottom",
+                    rect(0f, .58f, 1f, 1f),
+                    rect(0f, 0f, .5f, .58f),
+                    rect(.5f, 0f, 1f, .58f)));
+            return result;
+        }
+
+        result.add(new LayoutCandidate("four-grid",
+                rect(0f, 0f, .5f, .5f), rect(.5f, 0f, 1f, .5f),
+                rect(0f, .5f, .5f, 1f), rect(.5f, .5f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-columns",
+                rect(0f, 0f, .25f, 1f), rect(.25f, 0f, .5f, 1f),
+                rect(.5f, 0f, .75f, 1f), rect(.75f, 0f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-rows",
+                rect(0f, 0f, 1f, .25f), rect(0f, .25f, 1f, .5f),
+                rect(0f, .5f, 1f, .75f), rect(0f, .75f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-grid-narrow-left",
+                rect(0f, 0f, .38f, .5f), rect(0f, .5f, .38f, 1f),
+                rect(.38f, 0f, 1f, .5f), rect(.38f, .5f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-grid-short-top",
+                rect(0f, 0f, .5f, .38f), rect(.5f, 0f, 1f, .38f),
+                rect(0f, .38f, .5f, 1f), rect(.5f, .38f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-tall-left",
+                rect(0f, 0f, .40f, 1f),
+                rect(.40f, 0f, 1f, 1f / 3f),
+                rect(.40f, 1f / 3f, 1f, 2f / 3f),
+                rect(.40f, 2f / 3f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-tall-right",
+                rect(.60f, 0f, 1f, 1f),
+                rect(0f, 0f, .60f, 1f / 3f),
+                rect(0f, 1f / 3f, .60f, 2f / 3f),
+                rect(0f, 2f / 3f, .60f, 1f)));
+        result.add(new LayoutCandidate("four-wide-top",
+                rect(0f, 0f, 1f, .40f),
+                rect(0f, .40f, 1f / 3f, 1f),
+                rect(1f / 3f, .40f, 2f / 3f, 1f),
+                rect(2f / 3f, .40f, 1f, 1f)));
+        result.add(new LayoutCandidate("four-wide-bottom",
+                rect(0f, .60f, 1f, 1f),
+                rect(0f, 0f, 1f / 3f, .60f),
+                rect(1f / 3f, 0f, 2f / 3f, .60f),
+                rect(2f / 3f, 0f, 1f, .60f)));
+        return result;
+    }
+
+    private static RectSpec rect(float left, float top, float right, float bottom) {
+        return new RectSpec(left, top, right, bottom);
+    }
+
+    private static float clampRatio(float ratio) {
+        return Math.max(0.1f, Math.min(10f, ratio));
+    }
+
+    private static MediaItem.Orientation orientationForRatio(float ratio) {
+        if (ratio > 1.15f) return MediaItem.Orientation.HORIZONTAL;
+        if (ratio < 0.87f) return MediaItem.Orientation.VERTICAL;
+        return MediaItem.Orientation.SQUARE;
     }
 
     private View buildMediaCell(MediaItem item, int token, AtomicInteger remainingVideos) {
@@ -624,13 +768,6 @@ public class PlayerActivity extends Activity {
         return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
     }
 
-    private LinearLayout.LayoutParams weightedCellFor(LinearLayout parent) {
-        if (parent.getOrientation() == LinearLayout.HORIZONTAL) {
-            return new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f);
-        }
-        return new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
-    }
-
     private FrameLayout.LayoutParams match() {
         return new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -649,6 +786,104 @@ public class PlayerActivity extends Activity {
         final ArrayList<MediaItem> items;
         Slide(List<MediaItem> items) {
             this.items = new ArrayList<>(items);
+        }
+    }
+
+    private static final class RectSpec {
+        final float left;
+        final float top;
+        final float right;
+        final float bottom;
+
+        RectSpec(float left, float top, float right, float bottom) {
+            this.left = left;
+            this.top = top;
+            this.right = right;
+            this.bottom = bottom;
+        }
+
+        float width() {
+            return Math.max(0.001f, right - left);
+        }
+
+        float height() {
+            return Math.max(0.001f, bottom - top);
+        }
+    }
+
+    private static final class LayoutCandidate {
+        final String name;
+        final RectSpec[] cells;
+
+        LayoutCandidate(String name, RectSpec... cells) {
+            this.name = name;
+            this.cells = cells;
+        }
+    }
+
+    private static final class CollagePlan {
+        final LayoutCandidate layout;
+        final ArrayList<MediaItem> itemsByCell;
+
+        CollagePlan(LayoutCandidate layout, List<MediaItem> itemsByCell) {
+            this.layout = layout;
+            this.itemsByCell = new ArrayList<>(itemsByCell);
+        }
+    }
+
+    private static final class BestAssignment {
+        double score = -1.0;
+        ArrayList<MediaItem> items = new ArrayList<>();
+    }
+
+    /**
+     * ViewGroup sencillo que coloca cada celda usando coordenadas normalizadas.
+     * Las vistas internas siguen siendo FIT_CENTER/RESIZE_MODE_FIT.
+     */
+    private static final class SmartCollageLayout extends ViewGroup {
+        private final RectSpec[] cells;
+
+        SmartCollageLayout(Context context, RectSpec[] cells) {
+            super(context);
+            this.cells = cells;
+            setBackgroundColor(Color.BLACK);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int width = MeasureSpec.getSize(widthMeasureSpec);
+            int height = MeasureSpec.getSize(heightMeasureSpec);
+            setMeasuredDimension(width, height);
+
+            int count = Math.min(getChildCount(), cells.length);
+            for (int i = 0; i < count; i++) {
+                RectSpec cell = cells[i];
+                int childWidth = Math.max(1, Math.round(width * cell.width()));
+                int childHeight = Math.max(1, Math.round(height * cell.height()));
+                getChildAt(i).measure(
+                        MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY),
+                        MeasureSpec.makeMeasureSpec(childHeight, MeasureSpec.EXACTLY));
+            }
+        }
+
+        @Override
+        protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+            int width = right - left;
+            int height = bottom - top;
+            int count = Math.min(getChildCount(), cells.length);
+            for (int i = 0; i < count; i++) {
+                RectSpec cell = cells[i];
+                int childLeft = Math.round(width * cell.left);
+                int childTop = Math.round(height * cell.top);
+                int childRight = Math.round(width * cell.right);
+                int childBottom = Math.round(height * cell.bottom);
+                getChildAt(i).layout(childLeft, childTop, childRight, childBottom);
+            }
+        }
+
+        @Override
+        protected LayoutParams generateDefaultLayoutParams() {
+            return new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
         }
     }
 }

@@ -1,0 +1,23 @@
+Random Media Player v0.3 - parche
+=================================
+
+Este ZIP contiene cuatro archivos que sustituyen a los equivalentes del repositorio:
+
+- RandomMediaPlayer_v0.1-source(1)/app/src/main/java/com/randommedia/player/MediaItem.java
+- RandomMediaPlayer_v0.1-source(1)/app/src/main/java/com/randommedia/player/PlayerActivity.java
+- RandomMediaPlayer_v0.1-source(1)/app/build.gradle.kts
+- .github/workflows/build-apk.yml
+
+Cambios principales:
+
+- Analiza la relación de aspecto de los elementos incluidos en cada collage.
+- Distingue contenido horizontal, vertical y aproximadamente cuadrado.
+- Corrige las dimensiones declaradas por vídeos con rotación de 90 o 270 grados.
+- Compara distintas plantillas de 2, 3 y 4 elementos.
+- Ordena los archivos dentro de la plantilla que deja menos espacio negro.
+- Conserva FIT_CENTER para imágenes y RESIZE_MODE_FIT para Media3.
+- No deforma ni recorta imágenes o vídeos.
+- Actualiza la aplicación a la versión 0.3 y el artefacto a RandomMediaPlayer-v0.3-debug.
+
+Para aplicarlo, descomprime el ZIP y sube su contenido al repositorio conservando
+la estructura de carpetas. GitHub debe mostrar los cuatro archivos como modificados.
