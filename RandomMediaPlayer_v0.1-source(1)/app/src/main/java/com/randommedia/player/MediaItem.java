@@ -110,7 +110,11 @@ public final class MediaItem {
             }
             return new int[]{width, height};
         } finally {
-            retriever.release();
+            try {
+                retriever.release();
+            } catch (IOException | RuntimeException ignored) {
+                // Liberar el lector no debe impedir continuar con la presentación.
+            }
         }
     }
 
