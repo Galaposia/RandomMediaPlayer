@@ -1,0 +1,17 @@
+Random Media Player v0.4
+========================
+
+Esta versión renueva el menú principal con un diseño original inspirado en las
+interfaces de selección de los juegos clásicos:
+
+- Panel azul adaptable a orientación vertical y horizontal.
+- Tarjetas visuales para carpeta, tiempo de imagen y collage.
+- Controles reunidos en un panel central más claro.
+- Botón destacado para iniciar la presentación.
+- Botón de ayuda con una explicación breve.
+- Conserva las preferencias y la carpeta seleccionada de versiones anteriores.
+- Mantiene sin cambios Media3/ExoPlayer, FIT_CENTER y los collages inteligentes
+  de la versión 0.3.
+
+La compilación de GitHub Actions publica el artefacto:
+RandomMediaPlayer-v0.4-debug
