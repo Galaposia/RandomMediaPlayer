@@ -2,7 +2,7 @@ package com.randommedia.player;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.ColorStateList;
+import android.content.res.ColorStateList;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -523,4 +523,3 @@ public class MainActivity extends Activity {
         }
     }
 }
-
